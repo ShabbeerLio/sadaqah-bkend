@@ -5,7 +5,7 @@ const { body, validationResult } = require("express-validator");
 const bcrypt = require("bcryptjs");
 var jwt = require("jsonwebtoken");
 var fetchuser = require("../middleware/fetchUser");
-const { Institute, User } = require("../models/User");
+const { Institute, User,Admin } = require("../models/User");
 const nodemailer = require("nodemailer");
 const Otp = require("../models/Otp");
 const DeleteRequest = require("../models/DeleteRequest");
@@ -28,8 +28,8 @@ router.get(
   passport.authenticate("google", { session: false }),
   (req, res) => {
     const token = jwt.sign({ user: { id: req.user._id } }, JWT_SECRET);
-    // res.redirect(`http://localhost:3000/login/?token=${token}`); // redirect to frontend with token
-    res.redirect(`https://feastiq.netlify.app/login/?token=${token}`); // redirect to frontend with token
+    res.redirect(`http://localhost:3000/login/?token=${token}`); // redirect to frontend with token
+    // res.redirect(`https://feastiq.netlify.app/login/?token=${token}`); // redirect to frontend with token
   }
 );
 
@@ -95,7 +95,7 @@ router.post(
   "/login",
   [
     body("email", "Enter a valid Email").isEmail(),
-    body("password", "Enter a unique password").exists(),
+    body("password", "Password cannot be blank").exists(),
   ],
   async (req, res) => {
     let success = false;
@@ -105,32 +105,50 @@ router.post(
     }
 
     const { email, password } = req.body;
+
     try {
-      let user = await User.findOne({ email });
-      if (!user) {
-        success = false;
+      // 🔍 Try to find User first
+      let account = await User.findOne({ email });
+      let role = "user";
+
+      // If not found, try Institute
+      if (!account) {
+        account = await Institute.findOne({ email });
+        role = "institute";
+      }
+
+      // If neither found
+      if (!account) {
         return res
           .status(400)
-          .json({ error: "Please login with correct email and password" });
+          .json({ success, error: "Invalid email or password" });
       }
 
-      const passwordCompare = await bcrypt.compare(password, user.password);
-      if (!passwordCompare) {
-        success = false;
-        return res.status(400).json({
-          success,
-          error: "Please login with correct email and password",
-        });
+      // ✅ Check password
+      const isMatch = await bcrypt.compare(password, account.password);
+      if (!isMatch) {
+        return res
+          .status(400)
+          .json({ success, error: "Invalid email or password" });
       }
 
-      const data = {
-        user: {
-          id: user.id,
-        },
-      };
-      success = true;
+      // 🎯 Prepare payload for JWT
+      const data =
+        role === "institute"
+          ? { institute: { id: account.id } }
+          : { user: { id: account.id } };
+
       const authToken = jwt.sign(data, JWT_SECRET);
-      res.json({ success, authToken });
+      success = true;
+
+      // ✅ Send success response
+      res.json({
+        success,
+        authToken,
+        role,
+        name: account.name || account.instituteName,
+        email: account.email,
+      });
     } catch (error) {
       console.error(error.message);
       res.status(500).send("Internal server Error");
@@ -397,5 +415,125 @@ router.get("/institute/:id", fetchuser, async (req, res) => {
     res.status(500).send("Internal server error");
   }
 });
+
+// GET /api/institutes/following
+router.get("/following-institutes", fetchuser, async (req, res) => {
+  try {
+    // 1. Find current user and populate followingInstitutes
+    const user = await User.findById(req.user.id).populate(
+      "followingInstitutes",
+      "-password -__v"
+    ); // exclude sensitive fields
+
+    if (!user) {
+      return res.status(404).json({ success: false, msg: "User not found" });
+    }
+
+    // 2. Return the institutes the user follows
+    res.json({ success: true, followingInstitutes: user.followingInstitutes });
+  } catch (error) {
+    console.error(error.message);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+//  adhan select
+router.put("/set-default-institute/:id", fetchuser, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const newInstituteId = req.params.id;
+    const { enabledTimes } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    // Check if user follows this institute
+    if (!user.followingInstitutes.includes(newInstituteId)) {
+      return res.status(400).json({
+        success: false,
+        message: "You must follow this institute first",
+      });
+    }
+
+    // 🧩 Remove previous default institute if any
+    const oldInstituteId = user.defaultInstitute?.toString();
+
+    if (oldInstituteId && oldInstituteId !== newInstituteId) {
+      // Remove old adhan preference
+      user.adhanPreferences = user.adhanPreferences.filter(
+        (pref) => pref.institute.toString() !== oldInstituteId
+      );
+    }
+
+    // 🆕 Set new default institute
+    user.defaultInstitute = newInstituteId;
+
+    // 🧠 Update or Add new adhan preferences for this institute
+    const existingPrefIndex = user.adhanPreferences.findIndex(
+      (pref) => pref.institute.toString() === newInstituteId
+    );
+
+    if (existingPrefIndex > -1) {
+      // Update existing preference
+      user.adhanPreferences[existingPrefIndex].enabledTimes = {
+        ...user.adhanPreferences[existingPrefIndex].enabledTimes,
+        ...enabledTimes,
+      };
+    } else {
+      // Add new preference for new institute
+      user.adhanPreferences.push({
+        institute: newInstituteId,
+        enabledTimes: enabledTimes || {},
+      });
+    }
+
+    await user.save();
+
+    return res.json({
+      success: true,
+      message: "Default institute and Adhan preferences updated successfully",
+      defaultInstitute: user.defaultInstitute,
+      adhanPreferences: user.adhanPreferences,
+    });
+  } catch (error) {
+    console.error(error.message);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Route: Update Consent
+router.put("/consent", fetchuser, async (req, res) => {
+  try {
+    const { consent } = req.body;
+
+    if (typeof consent !== "boolean") {
+      return res
+        .status(400)
+        .json({ success: false, message: "Consent must be true or false" });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { consent },
+      { new: true }
+    ).select("-password");
+
+    res.json({
+      success: true,
+      message: "Consent updated",
+      consent: user.consent,
+    });
+  } catch (error) {
+    console.error(error.message);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 
 module.exports = router;

@@ -3,7 +3,7 @@ const router = express.Router();
 const { body, validationResult } = require("express-validator");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { Admin } = require("../models/User");
+const { Institute, Admin } = require("../models/User");
 const fetchadmin = require("../middleware/fetchAdmin");
 const JWT_SECRET = "SadaqahApp";
 const DeleteRequest = require("../models/DeleteRequest");
@@ -123,5 +123,60 @@ router.delete(
   }
 );
 
+// Wallet
+
+router.patch(
+  "/wallet-activation-request/:requestId",
+  fetchadmin,
+  async (req, res) => {
+    try {
+      const { requestId } = req.params;
+      const { action } = req.body; // accept or reject
+
+      const admin = await Admin.findOne();
+      const request = admin.walletActivationRequests.id(requestId);
+
+      if (!request) {
+        return res.status(404).json({ error: "Request not found" });
+      }
+
+      request.status = action === "accept" ? "accepted" : "rejected";
+      request.updatedAt = new Date();
+      await admin.save();
+
+      await Institute.findByIdAndUpdate(request.institute, {
+        $set: {
+          "wallet.isActive": action === "accept",
+          walletActivationStatus: action === "accept" ? "accepted" : "rejected",
+        },
+      });
+
+      res.json({
+        success: true,
+        message: `Wallet activation ${action}ed successfully`,
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+);
+
+router.get("/wallet-activation-requests", fetchadmin, async (req, res) => {
+  try {
+    const admin = await Admin.findOne().populate(
+      "walletActivationRequests.institute",
+      "userName email"
+    );
+
+    res.json({
+      success: true,
+      requests: admin.walletActivationRequests,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 module.exports = router;

@@ -5,28 +5,39 @@ const fetchuser = require("../middleware/fetchUser");
 const fetchinstitute = require("../middleware/fetchInstitute");
 const { User } = require("../models/User");
 const fetchadmin = require("../middleware/fetchAdmin");
+var jwt = require("jsonwebtoken");
+const JWT_SECRET = "SadaqahApp";
+const { upload } = require("../utils/cloudinary");
 
 // POST /api/posts/create
-router.post("/create", fetchinstitute, async (req, res) => {
-  try {
-    const { type, location, title, description, image } = req.body;
+router.post(
+  "/create",
+  fetchinstitute,
+  upload.array("images", 6),
+  async (req, res) => {
+    try {
+      const { type, location, title, description } = req.body;
+      const imageUrls = req.files?.map((file) => file.path) || [];
 
-    const post = new Post({
-      institute: req.institute.id, // ✅ institute only
-      type,
-      location,
-      title,
-      description,
-      image,
-    });
+      const post = new Post({
+        institute: req.institute.id, // ✅ institute only
+        type,
+        location,
+        title,
+        description,
+        image: imageUrls,
+      });
 
-    const savedPost = await post.save();
-    res.json({ success: true, post: savedPost });
-  } catch (error) {
-    console.error(error.message);
-    res.status(500).json({ success: false, message: "Internal server error" });
+      const savedPost = await post.save();
+      res.json({ success: true, post: savedPost });
+    } catch (error) {
+      console.error(error.message);
+      res
+        .status(500)
+        .json({ success: false, message: "Internal server error" });
+    }
   }
-});
+);
 
 // PUT /api/posts/like/:id
 router.put("/like/:id", fetchuser, async (req, res) => {
@@ -54,23 +65,114 @@ router.put("/like/:id", fetchuser, async (req, res) => {
 });
 
 // POST /api/posts/comment/:id
-router.post("/comment/:id", fetchuser, async (req, res) => {
+router.post("/comment/:id", async (req, res) => {
   try {
-    const post = await Post.findById(req.params.id);
-    if (!post) return res.status(404).json({ msg: "Post not found" });
+    const token = req.header("auth-token");
+    if (!token) {
+      return res.status(401).json({ success: false, msg: "No token provided" });
+    }
 
-    const comment = {
-      user: req.user.id, // ❌ if req.user is undefined → crash
-      text: req.body.text,
-    };
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ success: false, msg: "Invalid token" });
+    }
+
+    const { text } = req.body;
+    if (!text || text.trim() === "") {
+      return res
+        .status(400)
+        .json({ success: false, msg: "Comment cannot be empty" });
+    }
+
+    const post = await Post.findById(req.params.id);
+    if (!post)
+      return res.status(404).json({ success: false, msg: "Post not found" });
+
+    const comment = { text };
+
+    // Determine whether it's a user or institute
+    if (decoded.user) {
+      comment.user = decoded.user.id;
+    } else if (decoded.institute) {
+      comment.institute = decoded.institute.id;
+    } else {
+      return res
+        .status(401)
+        .json({ success: false, msg: "Not authorized to comment" });
+    }
 
     post.comments.push(comment);
     await post.save();
 
+    // Populate for front-end
+    await post.populate([
+      { path: "comments.user", select: "userName avatar" },
+      { path: "comments.institute", select: "userName avatar" },
+    ]);
+
     res.json({ success: true, comments: post.comments });
   } catch (error) {
     console.error(error.message);
-    res.status(500).send("Internal server error");
+    res.status(500).json({ success: false, msg: "Internal server error" });
+  }
+});
+
+// POST /api/posts/reply/:postId/:commentId
+router.post("/reply/:postId/:commentId", async (req, res) => {
+  try {
+    const token = req.header("auth-token");
+    if (!token) {
+      return res.status(401).json({ success: false, msg: "No token provided" });
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ success: false, msg: "Invalid token" });
+    }
+
+    const { postId, commentId } = req.params;
+    const { text } = req.body;
+
+    if (!text || text.trim() === "")
+      return res
+        .status(400)
+        .json({ success: false, msg: "Reply text cannot be empty" });
+
+    const post = await Post.findById(postId);
+    if (!post)
+      return res.status(404).json({ success: false, msg: "Post not found" });
+
+    const comment = post.comments.id(commentId);
+    if (!comment)
+      return res.status(404).json({ success: false, msg: "Comment not found" });
+
+    const reply = { text };
+    if (decoded.user) reply.user = decoded.user.id;
+    else if (decoded.institute) reply.institute = decoded.institute.id;
+    else
+      return res
+        .status(401)
+        .json({ success: false, msg: "Not authorized to reply" });
+
+    comment.replies.push(reply);
+    await post.save();
+
+    // ✅ populate both comments and replies for user & institute
+    await post.populate([
+      { path: "comments.user", select: "userName avatar" },
+      { path: "comments.institute", select: "userName avatar" },
+      { path: "comments.replies.user", select: "userName avatar" },
+      { path: "comments.replies.institute", select: "userName avatar" },
+    ]);
+
+    res.json({ success: true, replies: comment.replies });
+  } catch (error) {
+    console.error(error.message);
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
@@ -102,45 +204,72 @@ router.post("/share/:id", fetchuser, async (req, res) => {
 // PUBLIC ROUTES
 // ------------------------------------------------
 
-// GET /api/posts/all
 router.get("/all", async (req, res) => {
   try {
-    const posts = await Post.find()
-      .populate("institute", "username avatar email")
-      .populate("comments.user", "userName avatar");
+    const posts = await Post.find().sort({ createdAt: -1 });
+
+    // Populate post institute
+    await Post.populate(posts, {
+      path: "institute",
+      select: "userName avatar email",
+    });
+
+    // Populate comments + replies for both user & institute
+    await Post.populate(posts, [
+      { path: "comments.user", select: "userName avatar" },
+      { path: "comments.institute", select: "userName avatar" },
+      { path: "comments.replies.user", select: "userName avatar" },
+      { path: "comments.replies.institute", select: "userName avatar" }, // important!
+    ]);
+
     res.json(posts);
   } catch (error) {
-    console.error(error.message);
+    console.error(error);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
 // PUT /api/posts/edit/:id (Institute only)
-router.put("/edit/:id", fetchinstitute, async (req, res) => {
-  try {
-    const { title, description, image, type, location } = req.body;
+router.put(
+  "/edit/:id",
+  fetchinstitute,
+  upload.array("newImages", 6),
+  async (req, res) => {
+    try {
+      const post = await Post.findById(req.params.id);
+      if (!post)
+        return res.status(404).json({ success: false, msg: "Post not found" });
 
-    let post = await Post.findById(req.params.id);
-    if (!post)
-      return res.status(404).json({ success: false, msg: "Post not found" });
+      if (post.institute.toString() !== req.institute.id)
+        return res.status(403).json({ success: false, msg: "Not authorized" });
 
-    // check ownership
-    if (post.institute.toString() !== req.institute.id) {
-      return res.status(403).json({ success: false, msg: "Not authorized" });
+      // Remove deleted images
+      const removedImages = req.body.removedImages || [];
+      let updatedImages = post.image.filter(
+        (img) => !removedImages.includes(img)
+      );
+
+      // Add newly uploaded images
+      if (req.files && req.files.length > 0) {
+        const newImagePaths = req.files.map((file) => file.path); // depends on your multer setup
+        updatedImages = [...updatedImages, ...newImagePaths];
+      }
+
+      post.type = req.body.type || post.type;
+      post.title = req.body.title || post.title;
+      post.description = req.body.description || post.description;
+      post.location = req.body.location || post.location;
+      post.image = updatedImages;
+
+      await post.save();
+
+      res.json({ success: true, msg: "Post updated successfully", post });
+    } catch (error) {
+      console.error(error);
+      res.status(500).send("Internal Server Error");
     }
-
-    post = await Post.findByIdAndUpdate(
-      req.params.id,
-      { $set: { title, description, image, type, location } },
-      { new: true }
-    );
-
-    res.json({ success: true, post });
-  } catch (error) {
-    console.error(error.message);
-    res.status(500).send("Internal server error");
   }
-});
+);
 
 // DELETE /api/posts/delete/:id (Institute only)
 router.delete("/delete/:id", fetchinstitute, async (req, res) => {
@@ -158,6 +287,31 @@ router.delete("/delete/:id", fetchinstitute, async (req, res) => {
   } catch (error) {
     console.error(error.message);
     res.status(500).send("Internal server error");
+  }
+});
+
+// GET /api/posts/:id
+router.get("/:id", fetchinstitute, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+
+    if (!post) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Post not found" });
+    }
+
+    // Optional: Only allow owner institute to access
+    if (post.institute.toString() !== req.institute.id) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Not authorized" });
+    }
+
+    res.json({ success: true, post });
+  } catch (error) {
+    console.error("Error fetching post:", error.message);
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
@@ -279,6 +433,61 @@ router.put("/admin/activate/:id", fetchadmin, async (req, res) => {
   } catch (error) {
     console.error(error.message);
     res.status(500).send("Internal server error");
+  }
+});
+
+// GET /api/posts/following
+router.get("/following", fetchuser, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).populate(
+      "followingInstitutes"
+    );
+    if (!user) {
+      return res.status(404).json({ success: false, msg: "User not found" });
+    }
+
+    const instituteIds = user.followingInstitutes.map((inst) => inst._id);
+
+    if (!instituteIds.length) {
+      return res.json({ success: true, posts: [] });
+    }
+
+    // ✅ Fetch all posts (not just 1 per institute)
+    const posts = await Post.find({ institute: { $in: instituteIds } })
+      .populate("institute", "username avatar email")
+      .populate("comments.user", "userName avatar")
+      .sort({ createdAt: -1 });
+
+    res.json({ success: true, posts });
+  } catch (error) {
+    console.error(error.message);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// ✅ GET /api/posts/institute/:id
+router.get("/institute/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const posts = await Post.find({ institute: id })
+      .populate("institute", "username avatar email")
+      .populate("comments.user", "userName avatar")
+      .populate("comments.institute", "userName avatar")
+      .populate("comments.replies.user", "userName avatar")
+      .populate("comments.replies.institute", "userName avatar")
+      .sort({ createdAt: -1 });
+
+    if (!posts || posts.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, msg: "No posts found for this institute" });
+    }
+
+    res.json({ success: true, posts });
+  } catch (error) {
+    console.error(error.message);
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 

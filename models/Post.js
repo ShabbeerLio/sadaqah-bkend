@@ -1,10 +1,19 @@
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
 
-const CommentSchema = new Schema({
-  user: { type: Schema.Types.ObjectId, ref: "User", required: true }, // user who comments
+const ReplySchema = new Schema({
+  user: { type: Schema.Types.ObjectId, ref: "User" }, // optional
+  institute: { type: Schema.Types.ObjectId, ref: "Institute" }, // optional
   text: { type: String, required: true },
   date: { type: Date, default: Date.now },
+});
+
+const CommentSchema = new Schema({
+  user: { type: Schema.Types.ObjectId, ref: "User" }, // optional
+  institute: { type: Schema.Types.ObjectId, ref: "Institute" }, // optional
+  text: { type: String, required: true },
+  date: { type: Date, default: Date.now },
+  replies: [ReplySchema],
 });
 
 const ShareSchema = new Schema({

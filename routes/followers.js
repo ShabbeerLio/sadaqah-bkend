@@ -78,7 +78,7 @@ router.get("/my-following", fetchuser, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).populate(
       "followingInstitutes",
-      "username email instituteType"
+      "userName email instituteType"
     );
     res.json({ success: true, following: user.followingInstitutes });
   } catch (error) {

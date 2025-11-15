@@ -27,7 +27,7 @@ async function updateCollectedItems(donationRequest) {
 // ---------------------- USER PAYS OR DONATES ----------------------
 router.post("/pay/:instiId", fetchuser, async (req, res) => {
   try {
-    const { amount, type, donationRequestId } = req.body;
+    const { amount, type, transactionId, donationRequestId,fee } = req.body;
     const instiId = req.params.instiId;
 
     if (!amount || amount <= 0) {
@@ -48,38 +48,46 @@ router.post("/pay/:instiId", fetchuser, async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    // Create unique transactionId
-    const transactionId = `TXN-${Date.now()}-${Math.floor(
-      1000 + Math.random() * 9000
-    )}`;
-
-    // Create transaction object
+    // -----------------------------
+    // ✅ Build transaction object
+    // -----------------------------
     const transaction = {
       type,
       from: user.userName,
-      to: institute.username,
+      to: institute.userName,
       transactionId,
+      fee,
       amount,
       status: "accepted",
       date: new Date(),
     };
 
-    // Save in institute wallet
-    institute.wallet.balance += amount;
-    institute.wallet.totalReceived += amount;
-    institute.wallet.transactions.push(transaction);
-
-    // Save in user transactions
-    user.transactions.push(transaction);
-
-    // If type = Donation → update donationRequest
+    // ✅ Add donationRequestId only for Donation
     if (type === "Donation") {
       if (!donationRequestId) {
         return res
           .status(400)
           .json({ error: "donationRequestId is required for donations" });
       }
+      transaction.donationRequestId = donationRequestId;
+    }
 
+    // -----------------------------
+    // ✅ Update institute wallet
+    // -----------------------------
+    institute.wallet.balance += amount;
+    institute.wallet.totalReceived += amount;
+    institute.wallet.transactions.push(transaction);
+
+    // -----------------------------
+    // ✅ Update user transactions
+    // -----------------------------
+    user.transactions.push(transaction);
+
+    // -----------------------------
+    // ✅ Update donation request
+    // -----------------------------
+    if (type === "Donation") {
       const donationReq = await DonationRequest.findById(donationRequestId);
       if (!donationReq) {
         return res.status(404).json({ error: "Donation request not found" });
@@ -87,7 +95,9 @@ router.post("/pay/:instiId", fetchuser, async (req, res) => {
 
       donationReq.amountReceived += amount;
 
-      await updateCollectedItems(donationReq);
+      if (typeof updateCollectedItems === "function") {
+        await updateCollectedItems(donationReq);
+      }
 
       await donationReq.save();
     }
@@ -99,8 +109,7 @@ router.post("/pay/:instiId", fetchuser, async (req, res) => {
       success: true,
       message:
         type === "Donation" ? "Donation successful" : "Payment successful",
-      userTransactions: user.transactions,
-      instituteWallet: institute.wallet,
+      transaction,
     });
   } catch (error) {
     console.error(error.message);

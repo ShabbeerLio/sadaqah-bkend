@@ -26,7 +26,7 @@ router.post("/create", fetchInstitute, async (req, res) => {
 
     const donationRequest = new DonationRequest({
       institute: institute._id,
-      instituteName: institute.username, // 👈 added
+      instituteName: institute.userName, // 👈 added
       instituteLocation: institute.location, // 👈 added
       title,
       description,
@@ -51,7 +51,7 @@ router.get("/", async (req, res) => {
   try {
     const donations = await DonationRequest.find().populate(
       "institute",
-      "userName email instituteType location"
+      "userName email instituteType location avatar"
     );
 
     res.json({ success: true, donations });
@@ -122,7 +122,6 @@ router.put("/edit/:id", fetchInstitute, async (req, res) => {
   }
 });
 
-// ✅ Toggle Item Status (user changes taken/awaited, institute can mark fulfilled)
 // ✅ Toggle Item Status (user/institute actions)
 router.put(
   "/item-status/:requestId/:itemId",
@@ -137,32 +136,70 @@ router.put(
 
       if (!role) return res.status(401).json({ error: "Unauthorized" });
 
-      const donationRequest = await DonationRequest.findById(req.params.requestId);
-      if (!donationRequest) return res.status(404).json({ error: "Donation request not found" });
+      const donationRequest = await DonationRequest.findById(
+        req.params.requestId
+      );
+      if (!donationRequest)
+        return res.status(404).json({ error: "Donation request not found" });
 
       const item = donationRequest.items.id(req.params.itemId);
       if (!item) return res.status(404).json({ error: "Item not found" });
 
       const { status } = req.body;
 
-      // User toggles taken/awaited
+      // -------------------------------
+      // ✅ USER ACTIONS
+      // -------------------------------
+      // User toggles taken/awaited/pending
       if (role === "user") {
-        if (status === "taken" || status === "awaited") {
-          item.status = status;
+        if (status === "taken") {
+          if (item.status !== "pending") {
+            return res.status(400).json({ error: "Item already taken" });
+          }
+
+          item.status = "taken";
           item.updatedBy = "user";
-          item.takenAt = new Date(); // ✅ Track start time
-        } else if (status === "pending" && ["taken", "awaited"].includes(item.status)) {
-          // ✅ User can revert taken/awaited → pending
+
+          // ✅ Save who took it
+          item.takenBy = req.user.id;
+          item.takenAt = new Date();
+        } else if (status === "awaited") {
+          if (item.takenBy?.toString() !== req.user.id) {
+            return res
+              .status(403)
+              .json({
+                error: "Only the user who took this item can set it to awaited",
+              });
+          }
+          item.status = "awaited";
+          item.updatedBy = "user";
+        } else if (status === "pending") {
+          if (item.takenBy?.toString() !== req.user.id) {
+            return res
+              .status(403)
+              .json({
+                error: "Only the user who took this item can revert it",
+              });
+          }
           item.status = "pending";
           item.updatedBy = "user";
+
+          // ✅ Clear user info on revert
+          item.takenBy = null;
+          item.takenByName = null;
+          item.takenByLocation = null;
           item.takenAt = null;
         } else {
-          return res.status(400).json({ error: "Invalid status change for user" });
+          return res
+            .status(400)
+            .json({ error: "Invalid status change for user" });
         }
       }
 
-      // Institute actions
-      if (role === "institute") {
+      // -------------------------------
+      // ✅ INSTITUTE ACTIONS
+      // -------------------------------
+       if (role === "institute") {
         if (status === "fulfilled") {
           if (item.status !== "fulfilled") {
             donationRequest.amountReceived += item.total;
@@ -170,13 +207,31 @@ router.put(
           item.status = "fulfilled";
           item.updatedBy = "institute";
           item.takenAt = null;
+        } else if (status === "pending") {
+          // Allow institute to revert back to pending
+          // (in case they didn’t actually receive the item)
+          if (item.status === "fulfilled") {
+            donationRequest.amountReceived -= item.total;
+            if (donationRequest.amountReceived < 0)
+              donationRequest.amountReceived = 0;
+          }
+          item.status = "pending";
+          item.updatedBy = "institute";
+          item.takenAt = null;
         } else {
-          return res.status(400).json({ error: "Institute can only set fulfilled or cancelled" });
+          return res
+            .status(400)
+            .json({ error: "Institute can only set status to fulfilled or pending" });
         }
       }
 
       await donationRequest.save();
-      res.json({ success: true, donationRequest });
+
+      res.json({
+        success: true,
+        message: "Item status updated successfully",
+        item,
+      });
     } catch (error) {
       console.error(error.message);
       res.status(500).send("Internal server error");
